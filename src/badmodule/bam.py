@@ -9,13 +9,18 @@
 @邮箱        :wjwei9908@gmail.com
 '''
 
+from itertools import chain
+
+import numpy as np
+import pandas as pd
 import pysam
 from rich.progress import track
-import pandas as pd
-
 
 HIT_DICT = {0: 'EXONIC', 1: 'INTRONIC', 2: 'INTERGENIC'}
 
+POS_FILE = 'data/pos.range'
+pos_range = pd.read_csv(POS_FILE, header=None, names=[
+                                'pos', ]).values.flatten()
 
 class Bam:
 
@@ -26,14 +31,9 @@ class Bam:
 
     def __init__(self, bamfile, exon_ivl, indel_size,):
         self.bamfile = pysam.AlignmentFile(bamfile, 'rb')
-        self.exon_ivl = exon_ivl
         self.indel_size = indel_size
         self.contig_reads = self.get_total_reads(self.bamfile)
-        # self.multi_blocks = 0
-        # self.splice_beyond = 0
-        # self.intergeneic = 0
-        # self.unmapgene = 0
-        # self.total_reads = self.get_total_reads(bamfile)
+
 
 
 
@@ -68,25 +68,45 @@ class Bam:
 
 
 
-class BamContig:
+class SubBam:
     gene_tag = "GE:Z"
     hit_tag = "XF:i"
     spatial_x_tag = "Cx:i"
     spatial_y_tag = "Cy:i"
 
-    def __init__(self, bamfile, contig, exon_ivl, indel_size, total_reads):
-        self.bamfile = bamfile
+    def __init__(self, bamfile, chro,start,end, exon_ivl, indel_size):
+        self.bamfile = pysam.AlignmentFile(bamfile, 'rb')
         self.exon_ivl = exon_ivl
         self.indel_size = indel_size
         self.multi_blocks = 0
         self.splice_beyond = 0
         self.intergeneic = 0
         self.unmapgene = 0
-        self.contig_name = contig
-        self.bam_contig = self.bamfile.fetch(contig=contig)
-        self.total_reads = total_reads
+        self.region = f"{chro}:{start}-{end}"
+        self.bam_region = self.bamfile.fetch(contig=chro,start=start,end=end)
+        # self.total_reads = total_reads
         # self.rawgem_df = pd.DataFrame(columns=['gene','spatial','MIDCount','status','chrtype','segments'])
         # self.total_reads = self.get_total_reads(bamfile)
+
+    @staticmethod
+    def pos_bin_mapper(x, binWidth=50):
+        """trans pos('18183_12175') to bin('18150_12150'), default binWidth 50
+
+        Args:
+            x ([str in pandas.colnums]): [Any]
+            binWidth ([int]): [the width of bin, default 50]
+
+        Returns:
+            [str]: [x and y concat with '_' after bin]
+        """
+        x_num_str_before_bin = x.split('_')[0]
+        y_num_str_before_bin = x.split('_')[1]
+        x_num_int_after_bin = np.floor(
+            int(x_num_str_before_bin)/binWidth).astype(int)*binWidth
+        y_num_int_after_bin = np.floor(
+            int(y_num_str_before_bin)/binWidth).astype(int)*binWidth
+        new_pos = str(x_num_int_after_bin)+'_'+str(y_num_int_after_bin)
+        return new_pos
 
 
     def parse_cigar(self, cigartuples: tuple, pos: int, reverse: bool) -> list:
@@ -149,74 +169,71 @@ class BamContig:
 
         return segments
 
-    def bam2rawgem(self, outrawgem: str):
-        with open(outrawgem, 'w') as out_gem_handler:
-            for read in track(
-                    self.bam_contig,
-                    description=f"[bold green]Procesing bam {self.contig_name}",
-                    total=self.total_reads
-                ):
-                print(self.total_reads)
-                status = 'UN'
-                if read.is_unmapped or read.is_qcfail:
-                    continue
-                else:
-                    refname = read.reference_name
-                    chrtype = 'Chrom' if refname.startswith('chr') else 'Contig'
-                    try:
-                        gene = read.get_tag(self.gene_tag)
-                        hit = read.get_tag(self.hit_tag)
-                        x_pos = read.get_tag(self.spatial_x_tag)
-                        y_pos = read.get_tag(self.spatial_y_tag)
-                        spatial = f'{x_pos}_{y_pos}'
-                        pos = read.reference_start + 1
-                        segments = self.parse_cigar(
-                            read.cigartuples, pos, read.is_reverse)
-                        if HIT_DICT[hit] == 'INTONIC':
-                            status = 'Unspliced'
-                        elif HIT_DICT[hit] == 'EXONIC':
-                            if 'N' in read.cigarstring:
-                                starts, ends = zip(*segments)
-                                # if segemnts number >=4, then it is multi-blocks
-                                if len(segments) >= 4:
-                                    self.multi_blocks += 1
-                                    continue
-                                elif len(segments) == 3:
-                                    if any([_ in self.exon_ivl for _ in (starts[1:3] + ends[:2])]):
-                                        # if starts[1] in self.exon_ivl and starts[2] in self.exon_ivl and ends[0] in self.exon_ivl and ends[1] in self.exon_ivl:
-                                        status = 'Spliced'
-                                    else:
-                                        self.splice_beyond += 1
-                                        continue
+    def bam2rawgem(self,):
+        aaa = []
+        for read in self.bam_region:
+            status = 'UN'
+            if read.is_unmapped or read.is_qcfail:
+                self.unmapgene += 1
+                continue
+            else:
+                # refname = read.reference_name
+                # chrtype = 'Chrom' if refname.startswith('chr') else 'Contig'
+                try:
+                    gene = read.get_tag(self.gene_tag)
+                    hit = read.get_tag(self.hit_tag)
+                    x_pos = read.get_tag(self.spatial_x_tag)
+                    y_pos = read.get_tag(self.spatial_y_tag)
+                    spatial = f'{x_pos}_{y_pos}'
+                    # if spatial not in pos_range:
+                    #     continue
+                    pos = read.reference_start + 1
+                    if HIT_DICT[hit] == 'INTRONIC':
+                        status = 'Unspliced'
+                    elif HIT_DICT[hit] == 'EXONIC':
+                        if 'N' in read.cigarstring:
+                            segments = self.parse_cigar(read.cigartuples, pos, read.is_reverse)
+                            starts, ends = zip(*segments)
+                            # if segemnts number >=4, then it is multi-blocks
+                            if len(segments) >= 4:
+                                self.multi_blocks += 1
+                                continue
+                            elif len(segments) == 3:
+                                if any([_ in self.exon_ivl for _ in (starts[1:3] + ends[:2])]):
+                                    # if starts[1] in self.exon_ivl and starts[2] in self.exon_ivl and ends[0] in self.exon_ivl and ends[1] in self.exon_ivl:
+                                    status = 'Spliced'
                                 else:
-                                    if any([_ in self.exon_ivl for _ in [starts[1], ends[0]]]):
-                                        # if starts[1] in self.exon_ivl and ends[0] in self.exon_ivl:
-                                        status = 'Spliced'
-                                    else:
-                                        self.splice_beyond += 1
-                                        continue
+                                    self.splice_beyond += 1
+                                    continue
                             else:
-                                status = 'Ambiguous'
-                        elif HIT_DICT[hit] == 'INTERGENIC':
-                            self.intergeneic += 1
-                            continue
+                                if any([_ in self.exon_ivl for _ in [starts[1], ends[0]]]):
+                                    # if starts[1] in self.exon_ivl and ends[0] in self.exon_ivl:
+                                    status = 'Spliced'
+                                else:
+                                    self.splice_beyond += 1
+                                    continue
                         else:
-                            continue
-
-                        writeline = '\t'.join(
-                            [gene, spatial, '1', status, chrtype, str(segments)])
-
-                        out_gem_handler.write(writeline + '\n')
-
-                    except KeyError:
-                        self.unmapgene += 1
+                            status = 'Ambiguous'
+                    elif HIT_DICT[hit] == 'INTERGENIC':
+                        self.intergeneic += 1
                         continue
-            self.stat_df = self.get_stats()
+                    else:
+                        continue
+                except KeyError:
+                    self.intergeneic += 1
+                    continue
+            aaa.append([gene, spatial, 1, status])
+        aaa_df = pd.DataFrame(aaa, columns=['gene', 'spatial', 'MIDCount', 'status'])
+        aaa_df['spatial'] = aaa_df['spatial'].map(self.pos_bin_mapper)
+        aaaa = aaa_df.groupby(['gene', 'spatial', 'status']).size().reset_index().rename(columns={0: 'MIDcounts'})
+        # self.stat_df = self.get_stats()
+        return aaaa
+
 
     def get_stats(self):
         stat_df = pd.DataFrame(
             [{
-            'total_reads': self.total_reads,
+            # 'total_reads': self.total_reads,
             'unmapgene': self.unmapgene,
             'intergeneic': self.intergeneic,
             'splice_beyond': self.splice_beyond,
@@ -224,5 +241,3 @@ class BamContig:
             }]
             )
         return stat_df
-
-pd.DataFrame()
