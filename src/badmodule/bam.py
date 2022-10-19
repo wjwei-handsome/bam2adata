@@ -169,10 +169,13 @@ class SubBam:
 
         return segments
 
-    def bam2rawgem(self,):
+    def bam2rawgem(self,rmdup: bool):
         aaa = []
         for read in self.bam_region:
             status = 'UN'
+            if rmdup:
+                if read.is_duplicate:
+                    continue
             if read.is_unmapped or read.is_qcfail:
                 self.unmapgene += 1
                 continue
